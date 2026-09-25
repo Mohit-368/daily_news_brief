@@ -4,7 +4,10 @@ from typing import Any
 from google import genai
 
 from .config import settings
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 SYSTEM_PROMPT = """
 You are an expert current-affairs editor for Indian SSB aspirants.

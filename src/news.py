@@ -201,7 +201,7 @@ def fetch_rss() -> list[dict[str, Any]]:
                 articles.append(
                     {
                         "title": title,
-                        "link": link,
+                        "url": link,
                         "summary": summary,
                         "source": source,
                         "published": published.isoformat(),
@@ -233,17 +233,15 @@ def _deduplicate(
     unique: list[dict[str, Any]] = []
 
     for article in articles:
+        url = article.get("url", "").strip()
 
-        link = article.get("link", "").strip()
-
-        if not link:
+        if not url:
             continue
 
-        if link in seen:
+        if url in seen:
             continue
 
-        seen.add(link)
-
+        seen.add(url)
         unique.append(article)
 
     return unique
