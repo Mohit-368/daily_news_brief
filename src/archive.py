@@ -15,3 +15,4 @@ def save_brief(brief: dict) -> Path:
     )
 
     return path
+

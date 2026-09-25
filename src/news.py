@@ -1,57 +1,83 @@
+
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+import html
+import re
 
 import feedparser
 import requests
 
-from .config import settings
-
-
 IST = ZoneInfo("Asia/Kolkata")
 
+# RSS sources for SSB-relevant current affairs.
+# Google News RSS aggregates current articles from multiple publishers.
 RSS_FEEDS = [
-    ("PIB", "https://www.pib.gov.in/RssMain.aspx"),
+    (
+        "PIB",
+        "https://www.pib.gov.in/RssMain.aspx",
+    ),
     (
         "Google News Defence",
-        "https://news.google.com/rss/search?q=India+defence+military+DRDO+IAF+Indian+Navy+Indian+Army&hl=en-IN&gl=IN&ceid=IN:en",
+        "https://news.google.com/rss/search?"
+        "q=India+defence+military+DRDO+IAF+Indian+Navy+Indian+Army"
+        "&hl=en-IN&gl=IN&ceid=IN:en",
     ),
     (
         "Google News International",
-        "https://news.google.com/rss/search?q=India+international+relations+geopolitics&hl=en-IN&gl=IN&ceid=IN:en",
+        "https://news.google.com/rss/search?"
+        "q=India+international+relations+geopolitics+diplomacy"
+        "&hl=en-IN&gl=IN&ceid=IN:en",
     ),
     (
         "Google News National",
-        "https://news.google.com/rss/search?q=India+government+policy+economy+science+technology&hl=en-IN&gl=IN:en",
+        "https://news.google.com/rss/search?"
+        "q=India+government+policy+national+security"
+        "&hl=en-IN&gl=IN&ceid=IN:en",
     ),
-]
-
-# Keep this list focused. Six News API calls/day is comfortably below
-# the normal free Developer-plan daily request allowance.
-NEWS_API_QUERIES = [
-    "India defence military",
-    "DRDO ISRO",
-    "Indian Army Navy Air Force",
-    "India diplomacy geopolitics",
-    "India national security",
+    (
+        "Google News Economy",
+        "https://news.google.com/rss/search?"
+        "q=India+economy+RBI+GDP+inflation+trade"
+        "&hl=en-IN&gl=IN&ceid=IN:en",
+    ),
+    (
+        "Google News Science",
+        "https://news.google.com/rss/search?"
+        "q=ISRO+space+science+technology+India"
+        "&hl=en-IN&gl=IN&ceid=IN:en",
+    ),
 ]
 
 
 def _parse_datetime(value: str) -> datetime | None:
-    """Parse common RSS/ISO timestamps and return an aware datetime."""
+    """
+    Parse common RSS timestamps.
+
+    Returns an aware datetime.
+    """
     if not value:
         return None
 
+    value = str(value).strip()
+
+    # Handle ISO timestamps.
     try:
-        # Handles News API values such as 2026-09-25T08:12:00Z.
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
     except ValueError:
         pass
 
+    # Handle RSS timestamps.
     try:
         parsed = feedparser._parse_date(value)
+
         if parsed:
-            return datetime(*parsed[:6], tzinfo=timezone.utc)
+            return datetime(
+                *parsed[:6],
+                tzinfo=timezone.utc,
+            )
     except Exception:
         pass
 
@@ -59,14 +85,24 @@ def _parse_datetime(value: str) -> datetime | None:
 
 
 def _entry_published(entry: Any) -> str:
-    """Return the best available publication timestamp from an RSS entry."""
-    published = getattr(entry, "published", "") or getattr(entry, "updated", "")
+    """
+    Return the best available publication timestamp.
+    """
+    published = (
+        getattr(entry, "published", "")
+        or getattr(entry, "updated", "")
+        or ""
+    )
+
     return str(published).strip()
 
 
 def is_today(published: str) -> bool:
-    """Return True when a timestamp falls on today's date in India."""
+    """
+    Return True when the article was published today in India.
+    """
     dt = _parse_datetime(published)
+
     if dt is None:
         return False
 
@@ -76,7 +112,24 @@ def is_today(published: str) -> bool:
     return dt.astimezone(IST).date() == datetime.now(IST).date()
 
 
+def _clean_text(value: str) -> str:
+    """
+    Remove HTML from RSS summaries.
+    """
+    if not value:
+        return ""
+
+    value = html.unescape(value)
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
 def fetch_rss() -> list[dict[str, Any]]:
+    """
+    Fetch today's articles from PIB and Google News RSS feeds.
+    """
     articles: list[dict[str, Any]] = []
 
     for source, url in RSS_FEEDS:
@@ -84,19 +137,46 @@ def fetch_rss() -> list[dict[str, Any]]:
             response = requests.get(
                 url,
                 timeout=20,
-                headers={"User-Agent": "SSB-Daily-Brief/1.1"},
+                headers={
+                    "User-Agent": "SSB-Daily-Brief/2.0"
+                },
             )
+
             response.raise_for_status()
+
             feed = feedparser.parse(response.content)
 
-            for entry in feed.entries[:30]:
-                title = getattr(entry, "title", "").strip()
-                link = getattr(entry, "link", "").strip()
-                summary = getattr(entry, "summary", "").strip()
+            if getattr(feed, "bozo", False):
+                print(
+                    f"[WARN] RSS parser warning for {source}: "
+                    f"{getattr(feed, 'bozo_exception', '')}"
+                )
+
+            source_count = 0
+
+            for entry in feed.entries[:50]:
+                title = (
+                    getattr(entry, "title", "")
+                    or ""
+                ).strip()
+
+                link = (
+                    getattr(entry, "link", "")
+                    or ""
+                ).strip()
+
+                summary = _clean_text(
+                    getattr(entry, "summary", "")
+                    or ""
+                )
+
                 published = _entry_published(entry)
 
-                # Do not let old RSS stories enter today's briefing.
-                if not title or not link or not is_today(published):
+                # Only include articles published today in IST.
+                if not title or not link:
+                    continue
+
+                if not is_today(published):
                     continue
 
                 articles.append(
@@ -108,101 +188,68 @@ def fetch_rss() -> list[dict[str, Any]]:
                         "published": published,
                     }
                 )
+
+                source_count += 1
+
+            print(
+                f"[INFO] {source}: "
+                f"{source_count} today's articles"
+            )
+
+        except requests.RequestException as exc:
+            print(
+                f"[WARN] Network error for RSS source "
+                f"{source}: {exc}"
+            )
+
         except Exception as exc:
-            print(f"[WARN] Failed RSS source {source}: {exc}")
+            print(
+                f"[WARN] Failed RSS source "
+                f"{source}: {exc}"
+            )
 
-    print(f"[INFO] Today's RSS articles: {len(articles)}")
-    return articles
-
-
-def _news_api_request(params: dict[str, Any]) -> list[dict[str, Any]]:
-    response = requests.get(
-        "https://newsapi.org/v2/top-headlines",
-        params=params,
-        headers={"X-Api-Key": settings.news_api_key},
-        timeout=20,
+    print(
+        f"[INFO] Total today's RSS articles: "
+        f"{len(articles)}"
     )
-    response.raise_for_status()
 
-    data = response.json()
-
-    if data.get("status") != "ok":
-        raise RuntimeError(data.get("message", "News API returned an error."))
-
-    return data.get("articles", [])
-
-
-def fetch_news_api() -> list[dict[str, Any]]:
-    """Fetch current Indian headlines, rather than delayed /everything results."""
-    if not settings.news_api_key:
-        print("[INFO] NEWS_API_KEY not configured. Skipping News API.")
-        return []
-
-    articles: list[dict[str, Any]] = []
-
-    # First get general Indian headlines.
-    queries: list[str | None] = [None, *NEWS_API_QUERIES]
-
-    for query in queries:
-        try:
-            params: dict[str, Any] = {
-                "country": "in",
-                "language": "en",
-                "pageSize": 20,
-            }
-            if query:
-                params["q"] = query
-
-            raw_articles = _news_api_request(params)
-
-            for article in raw_articles:
-                published = article.get("publishedAt", "")
-
-                # News API returns publishedAt in UTC. Convert to IST before
-                # deciding whether the story belongs to today's briefing.
-                if not is_today(published):
-                    continue
-
-                title = article.get("title") or ""
-                url = article.get("url") or ""
-
-                if not title or not url:
-                    continue
-
-                articles.append(
-                    {
-                        "source": article.get("source", {}).get("name") or "News API",
-                        "title": title,
-                        "url": url,
-                        "summary": article.get("description") or "",
-                        "published": published,
-                    }
-                )
-        except Exception as exc:
-            label = query or "general India headlines"
-            print(f"[WARN] News API query failed ({label}): {exc}")
-
-    print(f"[INFO] Today's News API articles: {len(articles)}")
     return articles
 
 
-def _deduplicate(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove duplicates using URL first and normalized title second."""
+def _deduplicate(
+    articles: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    Remove duplicate articles using URL first
+    and normalized title second.
+    """
     seen_urls: set[str] = set()
     seen_titles: set[str] = set()
+
     unique: list[dict[str, Any]] = []
 
     for article in articles:
-        url = article.get("url", "").strip().lower()
-        title = " ".join(article.get("title", "").lower().split())
+        url = (
+            article.get("url", "")
+            .strip()
+            .lower()
+        )
+
+        title = " ".join(
+            article.get("title", "")
+            .lower()
+            .split()
+        )
 
         if url and url in seen_urls:
             continue
+
         if title and title in seen_titles:
             continue
 
         if url:
             seen_urls.add(url)
+
         if title:
             seen_titles.add(title)
 
@@ -211,23 +258,54 @@ def _deduplicate(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
+def _sort_key(article: dict[str, Any]) -> datetime:
+    """
+    Return a sortable datetime.
+
+    Articles without valid timestamps are placed at the end.
+    """
+    dt = _parse_datetime(
+        article.get("published", "")
+    )
+
+    if dt is None:
+        return datetime.min.replace(
+            tzinfo=timezone.utc
+        )
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt
+
+
 def fetch_all_news() -> list[dict[str, Any]]:
-    articles = fetch_rss() + fetch_news_api()
+    """
+    Fetch, filter, deduplicate and sort today's news.
+
+    News API is intentionally NOT used.
+    """
+    articles = fetch_rss()
+
     unique = _deduplicate(articles)
 
-    # Most recent first. Missing/invalid timestamps naturally fall to the end.
+    # Newest articles first.
     unique.sort(
-        key=lambda article: _parse_datetime(article.get("published", ""))
-        or datetime.min.replace(tzinfo=timezone.utc),
+        key=_sort_key,
         reverse=True,
     )
 
-    print(f"[INFO] Collected {len(unique)} unique articles published today (IST).")
+    print(
+        f"[INFO] Collected "
+        f"{len(unique)} unique articles "
+        f"published today (IST)."
+    )
 
     for article in unique[:10]:
         print(
             f"[NEWS] {article['published']} | "
-            f"{article['source']} | {article['title']}"
+            f"{article['source']} | "
+            f"{article['title']}"
         )
 
     return unique
