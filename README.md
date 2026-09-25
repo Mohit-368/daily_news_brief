@@ -2,7 +2,7 @@
 
 # Daily News Brief
 
-**An automated current-affairs briefing service for SSB aspirants — built with Python, Gemini, and GitHub Actions.**
+**An automated current-affairs briefing service for aspirants — built with Python, Gemini, and GitHub Actions.**
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Gemini-2.5--flash-8E75B2?logo=googlegemini&logoColor=white)
