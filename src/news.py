@@ -1,5 +1,4 @@
-
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 import html
@@ -8,184 +7,204 @@ import re
 import feedparser
 import requests
 
+
 IST = ZoneInfo("Asia/Kolkata")
 
-# RSS sources for SSB-relevant current affairs.
-# Google News RSS aggregates current articles from multiple publishers.
-RSS_FEEDS = [
-    (
-        "PIB",
-        "https://www.pib.gov.in/RssMain.aspx",
-    ),
-    (
-        "Google News Defence",
+RSS_FEEDS = {
+    "PIB": "https://www.pib.gov.in/RssMain.aspx",
+
+    "Google News Defence": (
         "https://news.google.com/rss/search?"
         "q=India+defence+military+DRDO+IAF+Indian+Navy+Indian+Army"
-        "&hl=en-IN&gl=IN&ceid=IN:en",
+        "&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-    (
-        "Google News International",
+
+    "Google News International": (
         "https://news.google.com/rss/search?"
         "q=India+international+relations+geopolitics+diplomacy"
-        "&hl=en-IN&gl=IN&ceid=IN:en",
+        "&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-    (
-        "Google News National",
+
+    "Google News National": (
         "https://news.google.com/rss/search?"
         "q=India+government+policy+national+security"
-        "&hl=en-IN&gl=IN&ceid=IN:en",
+        "&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-    (
-        "Google News Economy",
+
+    "Google News Economy": (
         "https://news.google.com/rss/search?"
         "q=India+economy+RBI+GDP+inflation+trade"
-        "&hl=en-IN&gl=IN&ceid=IN:en",
+        "&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-    (
-        "Google News Science",
+
+    "Google News Science": (
         "https://news.google.com/rss/search?"
         "q=ISRO+space+science+technology+India"
-        "&hl=en-IN&gl=IN&ceid=IN:en",
+        "&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-]
+}
 
 
-def _parse_datetime(value: str) -> datetime | None:
+def _parse_datetime(value: Any) -> datetime | None:
     """
-    Parse common RSS timestamps.
-
-    Returns an aware datetime.
+    Convert feedparser datetime values to timezone-aware datetime.
     """
-    if not value:
+
+    if value is None:
         return None
 
-    value = str(value).strip()
-
-    # Handle ISO timestamps.
     try:
-        return datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-    except ValueError:
-        pass
+        if isinstance(value, datetime):
+            dt = value
 
-    # Handle RSS timestamps.
-    try:
-        parsed = feedparser._parse_date(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
 
-        if parsed:
-            return datetime(
-                *parsed[:6],
+            return dt.astimezone(IST)
+
+        # feedparser often gives struct_time
+        if hasattr(value, "tm_year"):
+            dt = datetime(
+                value.tm_year,
+                value.tm_mon,
+                value.tm_mday,
+                value.tm_hour,
+                value.tm_min,
+                value.tm_sec,
                 tzinfo=timezone.utc,
             )
+
+            return dt.astimezone(IST)
+
     except Exception:
-        pass
+        return None
 
     return None
 
 
-def _entry_published(entry: Any) -> str:
+def _entry_published(entry: Any) -> datetime | None:
     """
-    Return the best available publication timestamp.
+    Try all common feedparser date fields.
     """
-    published = (
-        getattr(entry, "published", "")
-        or getattr(entry, "updated", "")
-        or ""
-    )
 
-    return str(published).strip()
+    for field in (
+        "published_parsed",
+        "updated_parsed",
+        "created_parsed",
+    ):
+        value = entry.get(field)
+
+        dt = _parse_datetime(value)
+
+        if dt:
+            return dt
+
+    return None
 
 
-def is_today(published: str) -> bool:
+def _clean_text(text: str) -> str:
     """
-    Return True when the article was published today in India.
+    Remove HTML and normalize whitespace.
     """
-    dt = _parse_datetime(published)
+
+    if not text:
+        return ""
+
+    text = html.unescape(text)
+
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def _is_recent(dt: datetime | None) -> bool:
+    """
+    Accept articles published within the last 24 hours.
+
+    This is more reliable for a morning daily brief than requiring
+    the article's calendar date to exactly match today.
+    """
 
     if dt is None:
         return False
 
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(IST)
 
-    return dt.astimezone(IST).date() == datetime.now(IST).date()
+    age = now - dt
 
-
-def _clean_text(value: str) -> str:
-    """
-    Remove HTML from RSS summaries.
-    """
-    if not value:
-        return ""
-
-    value = html.unescape(value)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"\s+", " ", value)
-
-    return value.strip()
+    return timedelta(hours=-1) <= age <= timedelta(hours=24)
 
 
 def fetch_rss() -> list[dict[str, Any]]:
     """
-    Fetch today's articles from PIB and Google News RSS feeds.
+    Fetch articles from all RSS feeds.
     """
+
     articles: list[dict[str, Any]] = []
 
-    for source, url in RSS_FEEDS:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(X11; Linux x86_64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120 Safari/537.36"
+        )
+    }
+
+    for source, url in RSS_FEEDS.items():
+
         try:
             response = requests.get(
                 url,
+                headers=headers,
                 timeout=20,
-                headers={
-                    "User-Agent": "SSB-Daily-Brief/2.0"
-                },
             )
 
             response.raise_for_status()
 
             feed = feedparser.parse(response.content)
 
-            if getattr(feed, "bozo", False):
+            if feed.bozo:
                 print(
                     f"[WARN] RSS parser warning for {source}: "
-                    f"{getattr(feed, 'bozo_exception', '')}"
+                    f"{feed.bozo_exception}"
                 )
 
             source_count = 0
 
-            for entry in feed.entries[:50]:
-                title = (
-                    getattr(entry, "title", "")
-                    or ""
-                ).strip()
-
-                link = (
-                    getattr(entry, "link", "")
-                    or ""
-                ).strip()
-
-                summary = _clean_text(
-                    getattr(entry, "summary", "")
-                    or ""
-                )
+            for entry in feed.entries:
 
                 published = _entry_published(entry)
 
-                # Only include articles published today in IST.
-                if not title or not link:
+                if not published:
                     continue
 
-                if not is_today(published):
+                if not _is_recent(published):
+                    continue
+
+                title = _clean_text(
+                    entry.get("title", "")
+                )
+
+                link = entry.get("link", "")
+
+                summary = _clean_text(
+                    entry.get("summary", "")
+                )
+
+                if not title or not link:
                     continue
 
                 articles.append(
                     {
-                        "source": source,
                         "title": title,
-                        "url": link,
+                        "link": link,
                         "summary": summary,
-                        "published": published,
+                        "source": source,
+                        "published": published.isoformat(),
                     }
                 )
 
@@ -193,25 +212,14 @@ def fetch_rss() -> list[dict[str, Any]]:
 
             print(
                 f"[INFO] {source}: "
-                f"{source_count} today's articles"
+                f"{source_count} recent articles"
             )
 
-        except requests.RequestException as exc:
+        except Exception as e:
+
             print(
-                f"[WARN] Network error for RSS source "
-                f"{source}: {exc}"
+                f"[ERROR] Failed to fetch {source}: {e}"
             )
-
-        except Exception as exc:
-            print(
-                f"[WARN] Failed RSS source "
-                f"{source}: {exc}"
-            )
-
-    print(
-        f"[INFO] Total today's RSS articles: "
-        f"{len(articles)}"
-    )
 
     return articles
 
@@ -219,93 +227,49 @@ def fetch_rss() -> list[dict[str, Any]]:
 def _deduplicate(
     articles: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """
-    Remove duplicate articles using URL first
-    and normalized title second.
-    """
-    seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
+
+    seen: set[str] = set()
 
     unique: list[dict[str, Any]] = []
 
     for article in articles:
-        url = (
-            article.get("url", "")
-            .strip()
-            .lower()
-        )
 
-        title = " ".join(
-            article.get("title", "")
-            .lower()
-            .split()
-        )
+        link = article.get("link", "").strip()
 
-        if url and url in seen_urls:
+        if not link:
             continue
 
-        if title and title in seen_titles:
+        if link in seen:
             continue
 
-        if url:
-            seen_urls.add(url)
-
-        if title:
-            seen_titles.add(title)
+        seen.add(link)
 
         unique.append(article)
 
     return unique
 
 
-def _sort_key(article: dict[str, Any]) -> datetime:
-    """
-    Return a sortable datetime.
-
-    Articles without valid timestamps are placed at the end.
-    """
-    dt = _parse_datetime(
-        article.get("published", "")
-    )
-
-    if dt is None:
-        return datetime.min.replace(
-            tzinfo=timezone.utc
-        )
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    return dt
+def _sort_key(article: dict[str, Any]) -> str:
+    return article.get("published", "")
 
 
 def fetch_all_news() -> list[dict[str, Any]]:
     """
-    Fetch, filter, deduplicate and sort today's news.
-
-    News API is intentionally NOT used.
+    Main news collection function.
     """
+
     articles = fetch_rss()
 
-    unique = _deduplicate(articles)
+    articles = _deduplicate(articles)
 
-    # Newest articles first.
-    unique.sort(
+    articles.sort(
         key=_sort_key,
         reverse=True,
     )
 
     print(
         f"[INFO] Collected "
-        f"{len(unique)} unique articles "
-        f"published today (IST)."
+        f"{len(articles)} unique recent RSS articles."
     )
 
-    for article in unique[:10]:
-        print(
-            f"[NEWS] {article['published']} | "
-            f"{article['source']} | "
-            f"{article['title']}"
-        )
-
-    return unique
+    return articles
